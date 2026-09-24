@@ -114,6 +114,26 @@ function currentJobId() {
   return m ? m[1] : null
 }
 
+// Shared multi-extension convention with H1B Identifier (which also badges
+// LinkedIn job listings): both insert into one ordered stack container next
+// to the company name instead of separately racing for the "next sibling"
+// position, which caused mis-ordering and stale-badge bugs once two
+// extensions started inserting there independently. H1B Identifier always
+// prepends (top); Job Fitness Checker always appends (bottom).
+function ensureBadgeStack(companyEl) {
+  let stack = companyEl.nextElementSibling
+  if (!stack || !stack.hasAttribute('data-ext-badge-stack')) {
+    stack = document.createElement('div')
+    stack.setAttribute('data-ext-badge-stack', 'true')
+    stack.style.display = 'flex'
+    stack.style.flexDirection = 'column'
+    stack.style.alignItems = 'flex-start'
+    stack.style.gap = '4px'
+    companyEl.insertAdjacentElement('afterend', stack)
+  }
+  return stack
+}
+
 // ---- Fetching descriptions for jobs that aren't open ----
 // LinkedIn's list cards carry no description text at all, but the page
 // itself fetches each job's description from this internal API endpoint the
@@ -272,13 +292,12 @@ async function scanDetail() {
   const descriptionText = findDescriptionText()
   if (!descriptionText) return // description hasn't rendered yet; a later mutation will retry
 
-  const stale = companyEl.nextElementSibling
-  if (stale?.hasAttribute(BADGE_ATTR)) stale.remove()
   companyEl.setAttribute(FOR_ATTR, forKey)
 
   const result = scoreDescription(descriptionText)
-  const badge = makeDetailBadge(result)
-  companyEl.insertAdjacentElement('afterend', badge)
+  const stack = ensureBadgeStack(companyEl)
+  stack.querySelector(`[${BADGE_ATTR}]`)?.remove()
+  stack.appendChild(makeDetailBadge(result))
   renderKeywordPanel(result)
   await saveScore(jobId, result)
   applySort()
@@ -322,22 +341,26 @@ async function badgeListItems() {
   const scores = await loadScores()
   items.forEach((item) => {
     const jobId = item.getAttribute('data-occludable-job-id')
-    const scored = scores[jobId]
     const companyEl = item.querySelector(LIST_COMPANY_SELECTOR)
     if (!companyEl || !jobId) return
+
+    const scored = scores[jobId]
+    // Include jobId (not just the score timestamp) in the key so a badge
+    // left over from a *different* job — because LinkedIn recycled this
+    // list item's DOM node while scrolling — still gets detected as stale
+    // even before the new job has been scored.
+    const forKey = scored ? `${jobId}:${scored.ts}` : `${jobId}:pending`
+    if (companyEl.getAttribute(FOR_ATTR) === forKey) return
+
+    ensureBadgeStack(companyEl).querySelector(`[${BADGE_ATTR}]`)?.remove()
+    companyEl.setAttribute(FOR_ATTR, forKey)
 
     if (!scored) {
       enqueueDescriptionFetch(jobId)
       return
     }
 
-    const forKey = `${jobId}:${scored.ts}`
-    if (companyEl.getAttribute(FOR_ATTR) === forKey) return
-
-    const stale = companyEl.nextElementSibling
-    if (stale?.hasAttribute(BADGE_ATTR)) stale.remove()
-    companyEl.setAttribute(FOR_ATTR, forKey)
-    companyEl.insertAdjacentElement('afterend', makeListBadge(scored.pct))
+    ensureBadgeStack(companyEl).appendChild(makeListBadge(scored.pct))
   })
 
   applySort()
