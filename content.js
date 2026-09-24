@@ -1,9 +1,11 @@
 // Scores the currently-open LinkedIn job against a fixed set of resume
 // keywords, shows a color-coded match badge under the company name, and a
 // floating panel of matched (green) / missing (red) keywords pulled from the
-// job description. Also badges + can sort list items by score, but only for
-// jobs you've actually opened this session — LinkedIn's list cards carry no
-// description text, so there's nothing to score for jobs you haven't viewed.
+// job description. Also auto-scores every job in the results list in the
+// background (fetched from LinkedIn's own internal API, paced with a delay —
+// see fetchJobDescription) so every list item gets badged and the "Sort by
+// fitness score" toggle works across the whole visible list, not just jobs
+// you've clicked into.
 
 const BADGE_ATTR = 'data-jf-badge'
 const FOR_ATTR = 'data-jf-for'
@@ -110,6 +112,82 @@ async function saveScore(jobId, result) {
 function currentJobId() {
   const m = location.href.match(/currentJobId=(\d+)/) || location.href.match(/\/jobs\/view\/(\d+)/)
   return m ? m[1] : null
+}
+
+// ---- Fetching descriptions for jobs that aren't open ----
+// LinkedIn's list cards carry no description text at all, but the page
+// itself fetches each job's description from this internal API endpoint the
+// moment you open it (found by inspecting the network panel while clicking a
+// job). Calling it directly — with the same CSRF token LinkedIn's own JS
+// uses — lets every list item get scored without opening it.
+//
+// This relies on an undocumented, unversioned internal API: the queryId's
+// hash suffix is tied to LinkedIn's current frontend build and *will* go
+// stale whenever they ship a new one, at which point this silently stops
+// working (fetchJobDescription just returns null) until the hash below is
+// updated to match a fresh one from the network panel — badging/scoring
+// itself won't error out, it'll just stop finding new results.
+const JOB_DESCRIPTION_QUERY_ID = 'voyagerJobsDashJobPostingDetailSections.bc2eee77d01abc6616b8c8855344dfd5'
+
+function getCsrfToken() {
+  const m = document.cookie.match(/JSESSIONID="?([^";]+)"?/)
+  return m ? m[1] : null
+}
+
+async function fetchJobDescription(jobId) {
+  const csrfToken = getCsrfToken()
+  if (!csrfToken) return null
+  const variables = `(cardSectionTypes:List(JOB_DESCRIPTION_CARD),jobPostingUrn:urn%3Ali%3Afsd_jobPosting%3A${jobId},includeSecondaryActionsV2:true)`
+  const url = `https://www.linkedin.com/voyager/api/graphql?variables=${variables}&queryId=${JOB_DESCRIPTION_QUERY_ID}`
+  try {
+    const res = await fetch(url, {
+      headers: { accept: 'application/vnd.linkedin.normalized+json+2.1', 'csrf-token': csrfToken },
+    })
+    if (!res.ok) return null
+    const json = await res.json()
+    for (const item of json.included || []) {
+      const text = item?.description?.text || item?.descriptionText?.text
+      if (text) return text
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// Serial background queue so a burst of new list items (initial page load,
+// or scrolling in more results) doesn't fire dozens of requests at once —
+// LinkedIn's own UI never does that, and this shouldn't either.
+const queuedIds = new Set()
+const pendingQueue = []
+let queueRunning = false
+
+function enqueueDescriptionFetch(jobId) {
+  if (queuedIds.has(jobId)) return
+  queuedIds.add(jobId)
+  pendingQueue.push(jobId)
+  runQueue()
+}
+
+async function runQueue() {
+  if (queueRunning) return
+  queueRunning = true
+  while (pendingQueue.length > 0) {
+    const jobId = pendingQueue.shift()
+    const descriptionText = await fetchJobDescription(jobId)
+    if (descriptionText) {
+      const result = scoreDescription(descriptionText)
+      await saveScore(jobId, result)
+      badgeListItems()
+    }
+    queuedIds.delete(jobId)
+    await sleep(400)
+  }
+  queueRunning = false
 }
 
 // ---- Detail pane: badge + keyword panel for the open job ----
@@ -246,13 +324,14 @@ async function badgeListItems() {
     const jobId = item.getAttribute('data-occludable-job-id')
     const scored = scores[jobId]
     const companyEl = item.querySelector(LIST_COMPANY_SELECTOR)
-    if (!companyEl) return
+    if (!companyEl || !jobId) return
 
-    const forKey = scored ? `${jobId}:${scored.ts}` : null
     if (!scored) {
-      // Nothing cached yet for this job — leave it unbadged rather than guess.
+      enqueueDescriptionFetch(jobId)
       return
     }
+
+    const forKey = `${jobId}:${scored.ts}`
     if (companyEl.getAttribute(FOR_ATTR) === forKey) return
 
     const stale = companyEl.nextElementSibling
@@ -277,7 +356,7 @@ function ensureSortToggle() {
   bar.innerHTML = `
     <span class="jf-sort-label">
       <span class="jf-sort-checkbox" role="checkbox" aria-checked="false" tabindex="0"></span>
-      Sort by fitness score (Job Fitness — only jobs you've opened)
+      Sort by fitness score (Job Fitness — scoring visible jobs in the background)
     </span>
   `
   list.parentElement.insertBefore(bar, list)
