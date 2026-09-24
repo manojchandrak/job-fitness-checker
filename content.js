@@ -80,11 +80,16 @@ function scoreDescription(descriptionText) {
   return { matched, missing, pct }
 }
 
+// Loosened from an initial 80/55/30 split — real postings routinely mention far
+// more keywords than any one resume will cover (recruiters don't expect a 100%
+// match), so those thresholds graded nearly everything as a weak match. A real
+// test posting with 6 solid matches against 8 gaps (43%) reads as a genuinely
+// decent fit, not "missing lots of requirements."
 function scoreTier(pct) {
   if (pct === null) return { tier: 'unknown', label: 'No skills detected in posting' }
-  if (pct >= 80) return { tier: 'perfect', label: 'Perfect match' }
-  if (pct >= 55) return { tier: 'decent', label: 'Decent match' }
-  if (pct >= 30) return { tier: 'partial', label: 'Missing lots of requirements' }
+  if (pct >= 65) return { tier: 'perfect', label: 'Perfect match' }
+  if (pct >= 40) return { tier: 'decent', label: 'Decent match' }
+  if (pct >= 20) return { tier: 'partial', label: 'Missing lots of requirements' }
   return { tier: 'mismatch', label: 'Complete mismatch' }
 }
 
