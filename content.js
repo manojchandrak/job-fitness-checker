@@ -143,11 +143,32 @@ function ensureBadgeStack(companyEl) {
 //
 // This relies on an undocumented, unversioned internal API: the queryId's
 // hash suffix is tied to LinkedIn's current frontend build and *will* go
-// stale whenever they ship a new one, at which point this silently stops
-// working (fetchJobDescription just returns null) until the hash below is
-// updated to match a fresh one from the network panel — badging/scoring
-// itself won't error out, it'll just stop finding new results.
-const JOB_DESCRIPTION_QUERY_ID = 'voyagerJobsDashJobPostingDetailSections.bc2eee77d01abc6616b8c8855344dfd5'
+// stale whenever they ship a new one. To survive that, capture.js (running
+// in the page's own JS world) watches for LinkedIn's *own* frontend making
+// this exact request — which happens every time the user opens any job
+// posting — and reports the queryId it used via a CustomEvent. That's
+// stored below and preferred over this hardcoded fallback, so the fallback
+// is only what's used before the first such event ever fires (e.g. right
+// after install, before any job has been opened).
+const JOB_DESCRIPTION_QUERY_ID_FALLBACK = 'voyagerJobsDashJobPostingDetailSections.bc2eee77d01abc6616b8c8855344dfd5'
+const QUERY_ID_STORAGE_KEY = 'jf-query-id'
+
+let discoveredQueryId = null
+window.addEventListener('jf-query-id-discovered', (e) => {
+  const id = e.detail
+  if (!id || id === discoveredQueryId) return
+  discoveredQueryId = id
+  chrome.storage.local.set({ [QUERY_ID_STORAGE_KEY]: id })
+})
+
+async function getQueryId() {
+  if (discoveredQueryId) return discoveredQueryId
+  return new Promise((resolve) => {
+    chrome.storage.local.get(QUERY_ID_STORAGE_KEY, (res) => {
+      resolve(res[QUERY_ID_STORAGE_KEY] || JOB_DESCRIPTION_QUERY_ID_FALLBACK)
+    })
+  })
+}
 
 function getCsrfToken() {
   const m = document.cookie.match(/JSESSIONID="?([^";]+)"?/)
@@ -157,8 +178,9 @@ function getCsrfToken() {
 async function fetchJobDescription(jobId) {
   const csrfToken = getCsrfToken()
   if (!csrfToken) return null
+  const queryId = await getQueryId()
   const variables = `(cardSectionTypes:List(JOB_DESCRIPTION_CARD),jobPostingUrn:urn%3Ali%3Afsd_jobPosting%3A${jobId},includeSecondaryActionsV2:true)`
-  const url = `https://www.linkedin.com/voyager/api/graphql?variables=${variables}&queryId=${JOB_DESCRIPTION_QUERY_ID}`
+  const url = `https://www.linkedin.com/voyager/api/graphql?variables=${variables}&queryId=${queryId}`
   try {
     const res = await fetch(url, {
       headers: { accept: 'application/vnd.linkedin.normalized+json+2.1', 'csrf-token': csrfToken },

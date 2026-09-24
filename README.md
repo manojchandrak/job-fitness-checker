@@ -40,12 +40,22 @@ anywhere. Requests are queued and paced (~400ms apart) rather than fired all at 
 of new list items.
 
 This relies on an **undocumented, unversioned internal API** — specifically a `queryId` whose
-hash suffix is tied to LinkedIn's current frontend build. When LinkedIn ships a new build, that
-hash goes stale and `fetchJobDescription()` in `content.js` starts silently returning nothing
-(badging/scoring won't error, it'll just stop finding new results) until it's updated to match a
-fresh `queryId` — open a job on LinkedIn, check the Network tab for a request containing
-`JOB_DESCRIPTION_CARD`, and copy its `queryId` value into the `JOB_DESCRIPTION_QUERY_ID` constant
-near the top of `content.js`.
+hash suffix is tied to LinkedIn's current frontend build, and which would normally go stale
+(silently — `fetchJobDescription()` just stops finding new results, no error) whenever LinkedIn
+ships a new build.
+
+**The `queryId` now keeps itself up to date.** `capture.js` runs in the page's own JS world (not
+the extension's isolated one) and watches for LinkedIn's *own* frontend making this exact request
+— which happens every time you open any job posting. When it does, `capture.js` reads the
+`queryId` LinkedIn's own code just used and hands it to `content.js` via a DOM event; `content.js`
+saves it to `chrome.storage.local` and prefers it over the hardcoded fallback from then on. In
+practice this means the moment you open any job after LinkedIn ships a new build, the extension
+picks up the new `queryId` on its own — no manual step needed.
+
+The hardcoded `JOB_DESCRIPTION_QUERY_ID_FALLBACK` constant near the top of `content.js` is only
+ever used before that first discovery (e.g. right after install, before any job has been opened).
+If you ever need to set it by hand anyway: open a job on LinkedIn, check the Network tab for a
+request containing `JOB_DESCRIPTION_CARD`, and copy its `queryId` value in.
 
 ## The keyword baseline
 
@@ -80,5 +90,6 @@ great fit with a low score (or vice versa) if the posting is light on specific t
 
 - `manifest.json` — MV3 manifest
 - `content.js` — scoring logic, badge/panel injection, list badging + sort toggle
+- `capture.js` — runs in the page's JS world to auto-discover a fresh `queryId` (see above)
 - `content.css` — badge, panel, and sort-toggle styling
 - `icons/` — toolbar/extension icons
