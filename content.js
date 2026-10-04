@@ -241,10 +241,21 @@ const DETAIL_COMPANY_SELECTORS = [
   '.jobs-unified-top-card__company-name',
 ]
 
+const JOB_CARD = '[componentkey^="job-card-component-ref-"]'
+
 function findDetailCompanyElement() {
   for (const sel of DETAIL_COMPANY_SELECTORS) {
     const el = document.querySelector(sel)
     if (el && el.textContent.trim()) return el
+  }
+  // LinkedIn's newer layouts (/jobs/view/, /jobs/search-results/) have scrambled class names, so
+  // the selectors above find nothing. The employer is the first link to a /company/ page with
+  // visible text in the main content that isn't inside a job card, list row, sidebar or badge.
+  if (/^\/jobs\/(view|search-results)/.test(location.pathname)) {
+    const scope = document.querySelector('main') || document.body
+    return (
+      [...scope.querySelectorAll('a[href*="/company/"]')].find((a) => a.textContent.trim() && !a.closest(`li, aside, footer, [${BADGE_ATTR}], ${JOB_CARD}`)) || null
+    )
   }
   return null
 }
@@ -252,7 +263,16 @@ function findDetailCompanyElement() {
 function findDescriptionText() {
   const heading = [...document.querySelectorAll('h2, h3')].find((h) => /about the job/i.test(h.textContent))
   const container = heading?.nextElementSibling
-  return container?.textContent?.trim() || null
+  const text = container?.textContent?.trim()
+  if (text) return text
+  // Newer layouts: the "About the job" label may be any element. Take the text of the smallest
+  // block around it that holds a real description, without the label itself.
+  const label = [...document.querySelectorAll('main *')].find((e) => e.children.length === 0 && /^about the job$/i.test(e.textContent.trim()))
+  for (let node = label?.parentElement; node && node.tagName !== 'MAIN'; node = node.parentElement) {
+    const body = node.innerText.replace(/^\s*about the job\s*/i, '').trim()
+    if (body.length >= 200) return body.length > 20000 ? body.slice(0, 20000) : body
+  }
+  return null
 }
 
 function makeDetailBadge(result) {
@@ -327,8 +347,31 @@ async function scanDetail() {
 
 // ---- List view: badge + sort by cached score ----
 
-const LIST_ITEM_SELECTOR = 'li[data-occludable-job-id]'
-const LIST_COMPANY_SELECTOR = '.artdeco-entity-lockup__subtitle'
+// One entry per LinkedIn list layout. The new one (/jobs/search-results/) tags each card
+// componentkey="job-card-component-ref-<job id>", reads title / company / location as its
+// paragraphs, and lays the cards out in a flex column inside display:contents wrappers, so the
+// elements to reorder are the wrapper's child and the <hr> after it.
+const LIST_LAYOUTS = [
+  {
+    item: 'li[data-occludable-job-id]',
+    jobId: (item) => item.getAttribute('data-occludable-job-id'),
+    company: (item) => item.querySelector('.artdeco-entity-lockup__subtitle'),
+    container: 'ul, ol',
+    sortTargets: (item) => [item],
+  },
+  {
+    item: `[data-testid="lazy-column"] > [data-display-contents="true"]:has(${JOB_CARD})`,
+    jobId: (item) => item.querySelector(JOB_CARD)?.getAttribute('componentkey')?.replace('job-card-component-ref-', '') ?? null,
+    company: (item) => item.querySelectorAll('p')[1] ?? null,
+    container: '[data-testid="lazy-column"]',
+    sortTargets: (item) => [item.firstElementChild, item.nextElementSibling?.tagName === 'HR' ? item.nextElementSibling : null].filter(Boolean),
+  },
+]
+
+/** The list layout on this page: the first whose cards are on screen. */
+function listLayout() {
+  return LIST_LAYOUTS.find((l) => document.querySelector(l.item)) ?? null
+}
 
 function makeListBadge(pct) {
   const { tier, label } = scoreTier(pct)
@@ -342,28 +385,28 @@ function makeListBadge(pct) {
 let sortEnabled = false
 
 function applySort() {
+  const layout = listLayout()
+  if (!layout) return
   loadScores().then((scores) => {
-    document.querySelectorAll(LIST_ITEM_SELECTOR).forEach((item) => {
-      const jobId = item.getAttribute('data-occludable-job-id')
-      const scored = scores[jobId]
-      if (!sortEnabled) {
-        item.style.order = ''
-        return
-      }
-      item.style.order = scored ? String(-scored.pct) : '1'
+    document.querySelectorAll(layout.item).forEach((item) => {
+      const scored = scores[layout.jobId(item)]
+      const order = !sortEnabled ? '' : scored ? String(-scored.pct) : '1'
+      for (const target of layout.sortTargets(item)) target.style.order = order
     })
   })
 }
 
 async function badgeListItems() {
-  const items = document.querySelectorAll(LIST_ITEM_SELECTOR)
+  const layout = listLayout()
+  if (!layout) return
+  const items = document.querySelectorAll(layout.item)
   if (items.length === 0) return
   ensureSortToggle()
 
   const scores = await loadScores()
   items.forEach((item) => {
-    const jobId = item.getAttribute('data-occludable-job-id')
-    const companyEl = item.querySelector(LIST_COMPANY_SELECTOR)
+    const jobId = layout.jobId(item)
+    const companyEl = layout.company(item)
     if (!companyEl || !jobId) return
 
     const scored = scores[jobId]
@@ -390,9 +433,10 @@ async function badgeListItems() {
 
 function ensureSortToggle() {
   if (document.querySelector('[data-jf-sort-toggle]')) return
-  const firstItem = document.querySelector(LIST_ITEM_SELECTOR)
-  if (!firstItem) return
-  const list = firstItem.closest('ul, ol') || firstItem.parentElement
+  const layout = listLayout()
+  const firstItem = layout && document.querySelector(layout.item)
+  if (!layout || !firstItem) return
+  const list = firstItem.closest(layout.container) || firstItem.parentElement
   if (!list || !list.parentElement) return
 
   const bar = document.createElement('div')
